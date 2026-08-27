@@ -1,0 +1,135 @@
+# Inventory & Production Planning Automation
+## System Architecture
+
+**Project:** n8n Supply Chain Automation  
+**Business Context:** Finished Goods inventory and production planning  
+**Prototype Based On:** Vosker production-planning process  
+**Status:** Architecture v1.0  
+**Last Updated:** August 2026
+
+---
+
+## 1. Purpose
+
+This automation replaces a highly manual finished-goods production-planning process with a structured, repeatable workflow.
+
+The system will bring together four core data sources:
+
+1. Sales demand
+2. NetSuite inventory by location
+3. In-transit inventory
+4. SKU Master / product reference data
+
+The automation will process these inputs daily and generate:
+
+- A Finished Goods (FG) Planning Master
+- Production recommendations
+- Planner exceptions
+- Separate CM files for China and India
+
+The objective is **not to replace supply-chain judgment**.
+
+The objective is to automate repetitive data preparation, reconciliation, calculation, validation, and file generation so that the production analyst can focus on exceptions and decisions.
+
+---
+
+# 2. Business Problem
+
+The existing production-planning process relies heavily on Excel files, formulas, Power Automate refreshes, manual updates,
+and information communicated through email.
+
+The process can involve:
+
+- Monthly demand from Sales
+- NetSuite inventory dumps
+- Inventory by physical location
+- Manually maintained in-transit information
+- Product/package variations
+- Discontinued SKUs
+- New SKU launches
+- Costco bundles
+- Amazon kits
+- Twin packs
+- 3-packs
+- Single units
+- Different markets such as Canada, US, and Europe
+- Different contract manufacturers
+- BOM information
+
+Because these inputs are maintained separately, common problems include:
+
+- Incorrect inventory being matched to demand
+- Market/location mismatches
+- New SKUs missing from the planning file
+- Discontinued SKUs receiving production quantities
+- In-transit information becoming stale
+- Manual copy/paste errors
+- Formula-heavy Excel files becoming slow or unreliable
+- Production quantities being changed repeatedly
+- Manual generation of CM-specific files
+- Poor visibility into why a production recommendation was generated
+
+The automation is designed to address these problems systematically.
+
+---
+
+# 3. High-Level Architecture
+
+```text
+                         DAILY AUTOMATION RUN
+                                  |
+                                  v
+                    +---------------------------+
+                    |       DATA INPUTS         |
+                    +---------------------------+
+                       |        |       |      |
+                       |        |       |      |
+                       v        v       v      v
+                    DEMAND   INVENTORY  IN-   SKU MASTER
+                              (NetSuite) TRANSIT
+                       \        |       |      /
+                        \       |       |     /
+                         +------v-------v----+
+                                |
+                                v
+                     +----------------------+
+                     | DATA NORMALIZATION   |
+                     | & VALIDATION         |
+                     +----------------------+
+                                |
+                                v
+                     +----------------------+
+                     | SKU / MARKET /       |
+                     | LOCATION MATCHING    |
+                     +----------------------+
+                                |
+                                v
+                     +----------------------+
+                     | PLANNING ENGINE      |
+                     |                      |
+                     | Demand               |
+                     | Supply availability  |
+                     | In-transit           |
+                     | Safety-stock logic   |
+                     | Product status       |
+                     | MOQ / multiples      |
+                     +----------------------+
+                                |
+                         +------+------+
+                         |             |
+                         v             v
+                +----------------+  +----------------+
+                | FG PLANNING    |  | EXCEPTIONS     |
+                | MASTER         |  |                |
+                +-------+--------+  +----------------+
+                        |
+                        v
+                 +-------------+
+                 | CM ALLOCATION|
+                 +------+------+
+                        |
+                  +-----+-----+
+                  |           |
+                  v           v
+             CHINA CM      INDIA CM
+                FILE          FILE
