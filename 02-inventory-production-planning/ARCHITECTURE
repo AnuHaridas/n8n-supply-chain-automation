@@ -133,3 +133,503 @@ The automation is designed to address these problems systematically.
                   v           v
              CHINA CM      INDIA CM
                 FILE          FILE
+4. Core Data Inputs
+
+The system has four primary inputs.
+
+4.1 Demand
+
+Demand is provided by Sales.
+
+The production analyst does not generate or modify demand.
+
+Demand is treated as an input to the production-planning process.
+
+The planning horizon will initially contain multiple monthly periods, for example:
+
+September
+October
+November
+December
+January
+February
+March
+
+The exact planning horizon can be configured later.
+
+Principle
+
+Sales owns demand. Production Planning analyzes demand against available supply.
+
+4.2 NetSuite Inventory
+
+NetSuite provides the on-hand inventory dump.
+
+Inventory must retain location-level information.
+
+Example:
+
+SKU	Location	On Hand
+CAM001-EU	Europe	800
+CAM001-EU	Canada	50
+CAM001-CA	Canada	600
+
+The planning engine must not blindly aggregate all inventory for a SKU.
+
+Inventory eligibility must consider the SKU's intended market/location.
+
+This prevents a major failure mode from the original process:
+
+European demand being satisfied by inventory that belongs to Canada.
+
+4.3 In-Transit
+
+In-transit inventory is initially treated as a separate input.
+
+It may be maintained manually by the logistics team.
+
+Example:
+
+SKU	Destination	Quantity	Expected Date
+CAM001-EU	Europe	500	2026-09-15
+CAM001-CA	Canada	500	2026-10-01
+
+The automation will use this information when calculating available supply.
+
+The initial prototype will not attempt to automate the creation of in-transit data.
+
+4.4 SKU Master
+
+The SKU Master provides the business meaning of each SKU.
+
+It is a critical reference dataset.
+
+Potential fields include:
+
+Field	Purpose
+SKU	Unique product identifier
+SKU Description	Product description
+Product Type	Camera / Accessory / Bundle / etc.
+Package Type	Single / Twin / 3-Pack / 4-Pack / Kit / Costco Bundle
+Market	EU / CA / US / etc.
+Manufacturing Site	Manufacturing location
+Contract Manufacturer	China / India
+Status	Active / Discontinued
+Effective Date	Optional future use
+BOM Reference	Future use
+
+The SKU Master allows the automation to understand the business meaning of a SKU instead of relying only on SKU numbers.
+
+5. SKU and Location Logic
+
+SKU identification and location eligibility are separate concepts.
+
+The SKU Master defines the intended market and business characteristics of the SKU.
+
+The inventory source defines where physical inventory currently exists.
+
+The planning engine combines both.
+
+SKU MASTER
+    |
+    |-- Market / intended destination
+    |
+    v
+INVENTORY
+    |
+    |-- Physical location
+    |
+    v
+ELIGIBLE INVENTORY
+
+The system must validate that inventory being used to satisfy demand is appropriate for that SKU/market.
+
+This is a core business rule and must not be implemented as an uncontrolled spreadsheet SUMIF.
+
+6. Planning Engine
+
+The planning engine determines the production requirement for each finished good.
+
+The fundamental planning relationship is:
+
+Net Requirement
+=
+Demand
+-
+Eligible On-Hand Inventory
+-
+Relevant In-Transit
++
+Required Safety Stock
+
+The exact safety-stock calculation used in the original Vosker process is not yet known and will be documented separately in BUSINESS_RULES.md.
+
+The automation must not invent a new safety-stock methodology without an explicit business decision.
+
+7. Production Quantity
+
+Once the net requirement is determined, the system will calculate a production recommendation.
+
+Production quantities must respect manufacturing constraints.
+
+For the initial prototype:
+
+China MOQ = 500
+India MOQ = 500
+
+Production quantities will therefore be rounded according to the applicable production multiple/MOQ.
+
+Example:
+
+Calculated requirement = 620
+MOQ / production multiple = 500
+
+Recommended production = 1,000
+
+The exact rounding rule will be documented in BUSINESS_RULES.md.
+
+8. Low-Demand / MOQ Exception
+
+A production recommendation should not blindly trigger production when demand is very low.
+
+Example:
+
+4-month demand = 120
+MOQ = 500
+
+The system should be capable of identifying this as a planning exception.
+
+Example planner message:
+
+LOW DEMAND / MOQ REVIEW
+
+Demand over planning horizon: 120
+Production MOQ: 500
+Recommended action: Planner review before production
+Reason: Producing MOQ may create excess inventory.
+
+The threshold for this exception will be configurable rather than hardcoded.
+
+9. Discontinued SKU Logic
+
+Discontinued SKUs must not receive a normal production recommendation.
+
+Basic rule:
+
+IF SKU Status = Discontinued
+AND Demand > 0
+
+THEN
+    Production Quantity = 0
+    Create Planner Exception
+
+Example:
+
+Exception:
+DISCONTINUED SKU — DEMAND EXISTS
+
+SKU: CAM002-EU
+Demand: 350
+Production Recommendation: 0
+Planner Action: Review remaining demand / inventory strategy
+
+The automation may visually highlight discontinued SKUs in the FG output.
+
+However:
+
+Colour is presentation. The actual planning decision must be based on the SKU status field.
+
+10. Exceptions
+
+The system will maintain a separate Exceptions output.
+
+This prevents the main FG Planning Master from becoming overloaded with comments and manual notes.
+
+Potential exception types include:
+
+Discontinued SKU with demand
+Missing SKU Master record
+Market/location mismatch
+Missing inventory
+Missing in-transit information
+Low demand vs MOQ
+New SKU requiring validation
+Unexpected production requirement
+Other data-quality exceptions
+
+Example:
+
+Exception Type	SKU	Market	Demand	Production	Planner Action
+Discontinued SKU	CAM002	EU	350	0	Review
+MOQ Risk	CAM003	CA	120	500	Review excess
+Missing SKU Master	CAM004	US	800	—	Validate master
+Location Mismatch	CAM005	EU	500	—	Validate inventory
+
+The exception layer is where human intervention should be concentrated.
+
+11. FG Planning Master
+
+The automation will generate an FG Planning Master based on the input datasets.
+
+The FG structure should retain the business format used in the original planning process.
+
+Example:
+
+SKU	SKU Desc	Type	Sep	Oct	Nov	Dec	Jan	Feb	Mar
+CAM001	Camera X	Single	...	...	...	...	...	...	...
+
+For each SKU, the FG output will contain the relevant planning information required to understand the production recommendation.
+
+The final column structure will be defined in DATA_DICTIONARY.md.
+
+12. CM File Generation
+
+The FG Planning Master is not the same as the file sent to the Contract Manufacturer.
+
+The automation will create the CM files after the FG planning calculation.
+
+FG PLANNING MASTER
+        |
+        v
+CM ALLOCATION
+        |
+        +------------------+
+        |                  |
+        v                  v
+   CHINA CM FILE      INDIA CM FILE
+
+The CM file will contain only the products/quantities relevant to that manufacturing partner.
+
+The allocation will be based on SKU Master manufacturing information.
+
+The initial design should support:
+
+China CM
+India CM
+
+without creating separate planning logic for each CM.
+
+13. Product / Package Types
+
+The system must support different finished-good configurations.
+
+Examples include:
+
+Single camera
+Twin pack
+3-pack
+4-pack
+Amazon kits
+Costco bundles
+Accessories
+
+Different package types may represent different quantities of underlying units.
+
+For example:
+
+Twin Pack
+= 2 units
+
+3-Pack
+= 3 units
+
+Single
+= 1 unit
+
+The package/unit conversion logic will be documented separately.
+
+BOM explosion and component planning are not part of the first implementation.
+
+14. Future BOM Layer
+
+BOM processing will be added after the finished-goods planning engine is working correctly.
+
+Future architecture:
+
+FG Production Recommendation
+             |
+             v
+         BOM Explosion
+             |
+             v
+       Component Demand
+             |
+             v
+     Component Planning
+
+This will allow the automation to eventually determine component requirements based on finished-goods production quantities.
+
+BOM is intentionally excluded from the first version to keep the initial system focused and testable.
+
+15. Daily Execution
+
+The workflow is intended to run automatically on a daily schedule.
+
+Conceptually:
+
+Daily Trigger
+     |
+     v
+Retrieve latest inputs
+     |
+     v
+Validate data
+     |
+     v
+Calculate planning requirements
+     |
+     v
+Generate FG Planning Master
+     |
+     v
+Generate Exceptions
+     |
+     v
+Generate CM files
+     |
+     v
+Replace/update previous daily outputs
+
+The system should produce a fresh planning output based on the latest available data.
+
+Historical versions may be retained later for auditability and comparison.
+
+16. Architecture Principles
+
+The automation follows these principles:
+
+16.1 Separate data from logic
+
+Business rules should not be buried inside individual n8n nodes.
+
+Where practical, rules such as:
+
+MOQ
+production multiples
+SKU status
+market mapping
+manufacturing assignment
+
+should be maintained as reference/configuration data.
+
+16.2 Deterministic logic first
+
+Production quantities are primarily a deterministic planning problem.
+
+The system should use explicit supply-chain rules wherever possible.
+
+AI should only be introduced where it provides genuine value, such as:
+
+explaining an exception
+summarizing unusual conditions
+helping prioritize planner attention
+interpreting unstructured communication
+
+AI should not be used simply to make the project appear more "AI-powered."
+
+16.3 Human judgment remains in the loop
+
+The system recommends.
+
+The planner remains responsible for decisions requiring business judgment.
+
+Examples:
+
+Low-demand MOQ decisions
+Discontinued SKU demand
+unusual inventory situations
+market/location conflicts
+exceptional production decisions
+16.4 Modular workflow design
+
+The n8n implementation should use modular sub-workflows where they improve maintainability.
+
+Potential future sub-workflows include:
+
+Retrieve Demand
+Retrieve Inventory
+Retrieve In-Transit
+Validate SKU Master
+Calculate Production Requirement
+Generate CM File
+
+The exact sub-workflow structure will be finalized during WORKFLOW_DESIGN.md.
+
+16.5 Avoid recreating the Excel problem inside n8n
+
+The objective is not:
+
+"Take the giant Excel sheet and recreate it as 200 n8n nodes."
+
+The objective is:
+
+Separate data, rules, calculations, validation, exceptions, and outputs into simple reusable components.
+
+17. Initial System Boundary
+Included in Version 1
+Demand ingestion
+NetSuite inventory ingestion
+In-transit ingestion
+SKU Master
+Data normalization
+SKU/market/location validation
+Finished-goods planning
+MOQ logic
+Discontinued SKU checks
+Low-demand exceptions
+FG Planning Master generation
+Exception report
+China CM file generation
+India CM file generation
+Deferred
+BOM explosion
+Component planning
+Automated NetSuite SKU Master synchronization
+Automated in-transit updates
+Advanced AI agent functionality
+MCP integration
+Advanced error/retry architecture
+Forecast model generation
+Advanced inventory optimization
+
+These may be added as later capabilities once the core planning automation is stable.
+
+18. Future State
+
+The long-term vision is to move from:
+
+Multiple Excel files
+       +
+Manual checking
+       +
+Manual formulas
+       +
+Email instructions
+       +
+Planner debugging
+
+to:
+
+Structured data
+       ↓
+Automated validation
+       ↓
+Supply-chain planning logic
+       ↓
+Production recommendation
+       ↓
+Exception management
+       ↓
+CM-ready outputs
+       ↓
+Planner judgment where required
+
+The goal is not simply to automate a spreadsheet.
+
+The goal is to create a reusable supply-chain planning automation architecture that can be adapted to other repetitive planning problems.
+
+
+
+**This is now our architectural contract.** We can change it when we discover something genuinely wrong, but we shouldn't start adding random n8n features just because they're available.
+
+Next artifact should be **`DATA_DICTIONARY.md`** — that's where we get brutally specific about the columns in the **4 inputs + FG Master + Exceptions + China CM + India CM**. That will make building the actual n8n workflow dramatically easier.
