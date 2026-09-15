@@ -1,0 +1,10 @@
+{
+  "safety_stock_target_by_period": {
+    "W1": 20,
+    "W2": 20,
+    "W3": 20,
+    "W4": 20
+  },
+  "moq": 100,
+  "production_multiple": 50
+}
