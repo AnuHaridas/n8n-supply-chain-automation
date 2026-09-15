@@ -4,5 +4,9 @@
   "physical_shortage": 60,
   "buffer_gap": 80,
   "net_requirement": 80,
-  "recommended_production": 100
+  "recommended_production": 100,
+  "component_gross_requirements": {
+    "BOARD": 100,
+    "BATTERY": 200
+  }
 }

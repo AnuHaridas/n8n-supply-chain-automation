@@ -1,0 +1,3 @@
+parent_item,bom_revision,component_item,quantity_per,uom
+CAM-A,R1,BOARD,1,EA
+CAM-A,R1,BATTERY,2,EA

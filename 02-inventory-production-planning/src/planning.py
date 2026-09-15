@@ -36,6 +36,40 @@ class ProductionRequirementResult:
     recommended_production: int | float
 
 
+@dataclass(frozen=True)
+class ProductionOrder:
+    """A finished-good production quantity released for a start period."""
+
+    production_order_id: str
+    parent_item: str
+    production_quantity: int | float
+    production_start_period: Hashable
+    bom_revision: str
+
+
+@dataclass(frozen=True)
+class BomComponent:
+    """One component line in a one-level finished-good BOM revision."""
+
+    parent_item: str
+    bom_revision: str
+    component_item: str
+    quantity_per: int | float
+
+
+@dataclass(frozen=True)
+class ComponentGrossRequirement:
+    """An exploded component requirement attributable to one production order."""
+
+    production_order_id: str
+    parent_item: str
+    component_item: str
+    production_start_period: Hashable
+    bom_revision: str
+    quantity_per: int | float
+    gross_requirement: int | float
+
+
 def evaluate_accepted_supply_plan(
     *,
     opening_inventory: int | float,
@@ -118,3 +152,48 @@ def calculate_additional_production_requirement(
         production_multiple=production_multiple,
         recommended_production=recommended_production,
     )
+
+
+def explode_one_level_bom(
+    production_orders: Sequence[ProductionOrder],
+    bom_components: Sequence[BomComponent],
+) -> list[ComponentGrossRequirement]:
+    """Calculate time-phased gross component demand from production orders.
+
+    Results retain production-order detail so consumers can aggregate by period
+    and component without losing traceability. A production order must have at
+    least one BOM line matching both its parent item and BOM revision.
+    """
+
+    bom_by_parent_and_revision: dict[tuple[str, str], list[BomComponent]] = {}
+    for component in bom_components:
+        key = (component.parent_item, component.bom_revision)
+        bom_by_parent_and_revision.setdefault(key, []).append(component)
+
+    requirements: list[ComponentGrossRequirement] = []
+    for order in production_orders:
+        key = (order.parent_item, order.bom_revision)
+        applicable_components = bom_by_parent_and_revision.get(key)
+        if not applicable_components:
+            raise ValueError(
+                f"No BOM found for production order {order.production_order_id!r} "
+                f"(parent_item={order.parent_item!r}, "
+                f"bom_revision={order.bom_revision!r})"
+            )
+
+        for component in applicable_components:
+            requirements.append(
+                ComponentGrossRequirement(
+                    production_order_id=order.production_order_id,
+                    parent_item=order.parent_item,
+                    component_item=component.component_item,
+                    production_start_period=order.production_start_period,
+                    bom_revision=order.bom_revision,
+                    quantity_per=component.quantity_per,
+                    gross_requirement=(
+                        order.production_quantity * component.quantity_per
+                    ),
+                )
+            )
+
+    return requirements

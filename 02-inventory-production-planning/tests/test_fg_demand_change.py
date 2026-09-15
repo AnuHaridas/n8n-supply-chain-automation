@@ -3,8 +3,11 @@ import json
 from pathlib import Path
 
 from src.planning import (
+    BomComponent,
+    ProductionOrder,
     calculate_additional_production_requirement,
     evaluate_accepted_supply_plan,
+    explode_one_level_bom,
 )
 
 
@@ -31,6 +34,19 @@ def test_fg_demand_change_fixture_produces_expected_result() -> None:
         encoding="utf-8", newline=""
     ) as production_plan_file:
         production_plan = list(csv.DictReader(production_plan_file))
+
+    with (FIXTURE_DIRECTORY / "bom.csv").open(
+        encoding="utf-8", newline=""
+    ) as bom_file:
+        bom_components = tuple(
+            BomComponent(
+                parent_item=row["parent_item"],
+                bom_revision=row["bom_revision"],
+                component_item=row["component_item"],
+                quantity_per=int(row["quantity_per"]),
+            )
+            for row in csv.DictReader(bom_file)
+        )
 
     with (FIXTURE_DIRECTORY / "policy.json").open(encoding="utf-8") as policy_file:
         policy = json.load(policy_file)
@@ -65,6 +81,19 @@ def test_fg_demand_change_fixture_produces_expected_result() -> None:
         production_multiple=policy["production_multiple"],
     )
 
+    component_requirements = explode_one_level_bom(
+        production_orders=(
+            ProductionOrder(
+                production_order_id="PROPOSED-W3",
+                parent_item="CAM-A",
+                production_quantity=production_requirement.recommended_production,
+                production_start_period=expected["period"],
+                bom_revision="R1",
+            ),
+        ),
+        bom_components=bom_components,
+    )
+
     actual = {
         "period": target_period_result.period,
         "closing_balance": target_period_result.closing_balance,
@@ -72,6 +101,10 @@ def test_fg_demand_change_fixture_produces_expected_result() -> None:
         "buffer_gap": target_period_result.buffer_gap,
         "net_requirement": production_requirement.net_requirement,
         "recommended_production": production_requirement.recommended_production,
+        "component_gross_requirements": {
+            requirement.component_item: requirement.gross_requirement
+            for requirement in component_requirements
+        },
     }
 
     assert actual == expected, (
