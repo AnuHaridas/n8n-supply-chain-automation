@@ -95,6 +95,51 @@ class PeriodOffsetResult:
     status: str
 
 
+@dataclass(frozen=True)
+class DemandChangeResult:
+    """The comparison of two demand snapshots for one item and period."""
+
+    item: str
+    period: Hashable
+    previous_demand: int | float | None
+    latest_demand: int | float | None
+    demand_delta: int | float | None
+    change_type: str
+    presence_status: str
+
+
+@dataclass(frozen=True)
+class CommunicatedPlanRecord:
+    """A production quantity previously communicated to a contract manufacturer."""
+
+    item: str
+    period: Hashable
+    communicated_quantity: int | float
+    cm: str
+    communicated_date: str
+
+
+@dataclass(frozen=True)
+class PlanningControlResult:
+    """The frozen/open planning decision for one item and period."""
+
+    item: str
+    period: Hashable
+    previous_demand: int | float | None
+    latest_demand: int | float | None
+    demand_delta: int | float | None
+    demand_change_type: str
+    frozen_period_demand_change: bool
+    previously_communicated_production: int | float | None
+    newly_calculated_production_recommendation: int | float
+    production_delta: int | float | None
+    protected_production_quantity: int | float
+    planning_status: str
+    review_comment_required: bool
+    cm: str | None
+    communicated_date: str | None
+
+
 def evaluate_accepted_supply_plan(
     *,
     opening_inventory: int | float,
@@ -341,3 +386,148 @@ def calculate_po_release_period(
         target_period=component_need_period,
         lead_time_periods=purchase_lead_time_periods,
     )
+
+
+def compare_demand_snapshots(
+    *,
+    last_accepted_demand: Mapping[tuple[str, Period], int | float],
+    latest_demand: Mapping[tuple[str, Period], int | float],
+) -> list[DemandChangeResult]:
+    """Compare demand snapshots without treating absent combinations as zero.
+
+    Rows follow the insertion order of the accepted snapshot, followed by any
+    item-period combinations that exist only in the latest snapshot.
+    """
+
+    keys = tuple(dict.fromkeys((*last_accepted_demand, *latest_demand)))
+    results: list[DemandChangeResult] = []
+
+    for item, period in keys:
+        previous_value = last_accepted_demand.get((item, period))
+        latest_value = latest_demand.get((item, period))
+
+        if (item, period) not in last_accepted_demand:
+            demand_delta = None
+            change_type = "NOT_COMPARABLE"
+            presence_status = "NEW_ITEM_PERIOD"
+        elif (item, period) not in latest_demand:
+            demand_delta = None
+            change_type = "NOT_COMPARABLE"
+            presence_status = "MISSING_LATEST_ITEM_PERIOD"
+        else:
+            demand_delta = latest_value - previous_value
+            if demand_delta > 0:
+                change_type = "INCREASE"
+            elif demand_delta < 0:
+                change_type = "DECREASE"
+            else:
+                change_type = "UNCHANGED"
+            presence_status = "PRESENT_IN_BOTH"
+
+        results.append(
+            DemandChangeResult(
+                item=item,
+                period=period,
+                previous_demand=previous_value,
+                latest_demand=latest_value,
+                demand_delta=demand_delta,
+                change_type=change_type,
+                presence_status=presence_status,
+            )
+        )
+
+    return results
+
+
+def classify_communicated_periods(
+    *,
+    demand_changes: Sequence[DemandChangeResult],
+    new_production_recommendations: Mapping[tuple[str, Period], int | float],
+    communicated_plan: Sequence[CommunicatedPlanRecord],
+) -> list[PlanningControlResult]:
+    """Classify recalculated production without overwriting communicated periods."""
+
+    communicated_by_key: dict[tuple[str, Hashable], CommunicatedPlanRecord] = {}
+    for record in communicated_plan:
+        key = (record.item, record.period)
+        if key in communicated_by_key:
+            raise ValueError(
+                f"Duplicate communicated plan for item {record.item!r}, "
+                f"period {record.period!r}"
+            )
+        communicated_by_key[key] = record
+
+    demand_change_by_key = {
+        (change.item, change.period): change for change in demand_changes
+    }
+    keys = tuple(
+        dict.fromkeys(
+            (
+                *demand_change_by_key,
+                *new_production_recommendations,
+                *communicated_by_key,
+            )
+        )
+    )
+    results: list[PlanningControlResult] = []
+
+    for item, period in keys:
+        key = (item, period)
+        if key not in new_production_recommendations:
+            raise ValueError(
+                f"Missing new production recommendation for item {item!r}, "
+                f"period {period!r}"
+            )
+
+        change = demand_change_by_key.get(key)
+        communicated = communicated_by_key.get(key)
+        new_recommendation = new_production_recommendations[key]
+        demand_changed = change is None or change.change_type != "UNCHANGED"
+
+        if communicated is None:
+            planning_status = "NEW_OPEN_PERIOD"
+            production_delta = None
+            protected_quantity = new_recommendation
+            review_comment_required = False
+        else:
+            production_delta = (
+                new_recommendation - communicated.communicated_quantity
+            )
+            protected_quantity = communicated.communicated_quantity
+            review_comment_required = demand_changed or production_delta != 0
+            if production_delta != 0:
+                planning_status = "FROZEN_PERIOD_PRODUCTION_CHANGE"
+            elif demand_changed:
+                planning_status = "FROZEN_PERIOD_DEMAND_CHANGE"
+            else:
+                planning_status = "UNCHANGED_FROZEN"
+
+        results.append(
+            PlanningControlResult(
+                item=item,
+                period=period,
+                previous_demand=(change.previous_demand if change else None),
+                latest_demand=(change.latest_demand if change else None),
+                demand_delta=(change.demand_delta if change else None),
+                demand_change_type=(
+                    change.change_type if change else "NOT_COMPARABLE"
+                ),
+                frozen_period_demand_change=(
+                    communicated is not None and demand_changed
+                ),
+                previously_communicated_production=(
+                    communicated.communicated_quantity if communicated else None
+                ),
+                newly_calculated_production_recommendation=new_recommendation,
+                production_delta=production_delta,
+                protected_production_quantity=protected_quantity,
+                planning_status=planning_status,
+                review_comment_required=review_comment_required,
+                cm=(communicated.cm if communicated else None),
+                communicated_date=(
+                    communicated.communicated_date if communicated else None
+                ),
+            )
+        )
+
+    return results

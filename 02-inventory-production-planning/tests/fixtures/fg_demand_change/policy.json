@@ -1,9 +1,9 @@
 {
   "safety_stock_target_by_period": {
-    "W1": 20,
-    "W2": 20,
-    "W3": 20,
-    "W4": 20
+    "September": 20,
+    "October": 20,
+    "November": 20,
+    "December": 20
   },
   "moq": 100,
   "production_multiple": 50

@@ -2,16 +2,22 @@
 
 import csv
 import json
+import re
 from collections import defaultdict
+from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Hashable, Mapping, Sequence
 
 from src.planning import (
     BomComponent,
+    CommunicatedPlanRecord,
+    PlanningControlResult,
     ProductionOrder,
     calculate_additional_production_requirement,
     calculate_po_release_period,
     calculate_production_start_period,
+    classify_communicated_periods,
+    compare_demand_snapshots,
     evaluate_accepted_supply_plan,
     evaluate_component_supply_plan,
     explode_one_level_bom,
@@ -27,8 +33,8 @@ MANUFACTURING_LEAD_TIME_PERIODS = 2
 # planning.py; these values only provide the component scenario to evaluate.
 COMPONENT_OPENING_INVENTORY = {"BOARD": 160, "BATTERY": 500}
 COMPONENT_SCHEDULED_RECEIPTS = {
-    "BOARD": {"W1": 20, "W2": 0, "W3": 0, "W4": 0},
-    "BATTERY": {"W1": 0, "W2": 0, "W3": 0, "W4": 0},
+    "BOARD": {"September": 20, "October": 0, "November": 0, "December": 0},
+    "BATTERY": {"September": 0, "October": 0, "November": 0, "December": 0},
 }
 COMPONENT_PURCHASE_LEAD_TIME_PERIODS = {"BOARD": 2, "BATTERY": 2}
 
@@ -40,13 +46,173 @@ def _read_csv_rows(filename: str) -> list[dict[str, str]]:
         return list(csv.DictReader(fixture_file))
 
 
-def build_demo_export_payload() -> dict[str, Any]:
+def _period_display_label(period: Hashable) -> str:
+    """Return a short display label for a named month, otherwise preserve it."""
+
+    period_text = str(period)
+    try:
+        return datetime.strptime(period_text, "%B").strftime("%b")
+    except ValueError:
+        return period_text
+
+
+def build_cm_plan_views(
+    *,
+    planning_controls: Sequence[PlanningControlResult],
+    ordered_periods: Sequence[Hashable],
+    planner_comments: Mapping[tuple[str, Hashable], str],
+) -> list[dict[str, Any]]:
+    """Build simple, presentation-only CM plans from frozen/open controls."""
+
+    periods = tuple(ordered_periods)
+    if len(set(periods)) != len(periods):
+        raise ValueError("Ordered periods contain duplicates")
+
+    display_label_by_period = {
+        period: _period_display_label(period) for period in periods
+    }
+    if len(set(display_label_by_period.values())) != len(periods):
+        raise ValueError("Period display labels are not unique")
+
+    controls_by_item: dict[str, dict[Hashable, PlanningControlResult]] = {}
+    item_order: list[str] = []
+    for control in planning_controls:
+        if control.item not in controls_by_item:
+            controls_by_item[control.item] = {}
+            item_order.append(control.item)
+        if control.period in controls_by_item[control.item]:
+            raise ValueError(
+                f"Duplicate planning control for item {control.item!r}, "
+                f"period {control.period!r}"
+            )
+        controls_by_item[control.item][control.period] = control
+
+    cm_by_item: dict[str, str] = {}
+    for item in item_order:
+        assigned_cms = tuple(
+            dict.fromkeys(
+                control.cm
+                for control in controls_by_item[item].values()
+                if control.cm
+            )
+        )
+        if not assigned_cms:
+            raise ValueError(f"No CM assignment found for item {item!r}")
+        if len(assigned_cms) > 1:
+            raise ValueError(
+                f"Multiple CM assignments found for item {item!r}: "
+                f"{assigned_cms!r}"
+            )
+        cm_by_item[item] = assigned_cms[0]
+
+    cm_order = tuple(dict.fromkeys(cm_by_item[item] for item in item_order))
+    cm_plans: list[dict[str, Any]] = []
+    for cm in cm_order:
+        cm_items = tuple(item for item in item_order if cm_by_item[item] == cm)
+        frozen_periods = tuple(
+            period
+            for period in periods
+            if any(
+                controls_by_item[item][period].previously_communicated_production
+                is not None
+                for item in cm_items
+            )
+        )
+        columns = [
+            "SKU",
+            *(display_label_by_period[period] for period in periods),
+            *(
+                f"{display_label_by_period[period]} Delta"
+                for period in frozen_periods
+            ),
+            "Comment",
+        ]
+        output_rows = []
+        missing_comment_periods = []
+
+        for item in cm_items:
+            missing_periods = [
+                period
+                for period in periods
+                if period not in controls_by_item[item]
+            ]
+            if missing_periods:
+                raise ValueError(
+                    f"Missing planning controls for item {item!r}: "
+                    f"{missing_periods!r}"
+                )
+
+            values: dict[str, Any] = {"SKU": item}
+            for period in periods:
+                values[display_label_by_period[period]] = controls_by_item[item][
+                    period
+                ].newly_calculated_production_recommendation
+
+            changed_frozen_periods = []
+            comment_parts = []
+            for period in frozen_periods:
+                control = controls_by_item[item][period]
+                delta = control.production_delta
+                if delta is None:
+                    raise ValueError(
+                        f"Frozen period {period!r} for item {item!r} has no delta"
+                    )
+                values[f"{display_label_by_period[period]} Delta"] = delta
+                if delta != 0:
+                    changed_frozen_periods.append(period)
+                    comment = planner_comments.get((item, period), "").strip()
+                    if comment:
+                        comment_parts.append(
+                            f"{display_label_by_period[period]}: {comment}"
+                        )
+                    else:
+                        missing_comment_periods.append(
+                            {"item": item, "period": period}
+                        )
+
+            values["Comment"] = "; ".join(comment_parts)
+            output_rows.append(
+                {
+                    "values": values,
+                    "changed_frozen_periods": changed_frozen_periods,
+                }
+            )
+
+        safe_cm_name = re.sub(r"[^A-Za-z0-9]+", "_", cm).strip("_")
+        cm_plans.append(
+            {
+                "cm": cm,
+                "filename": f"{safe_cm_name}_Production_Plan.xlsx",
+                "periods": list(periods),
+                "period_display_labels": display_label_by_period,
+                "frozen_periods": list(frozen_periods),
+                "columns": columns,
+                "rows": output_rows,
+                "missing_comment_periods": missing_comment_periods,
+                "ready_for_communication": not missing_comment_periods,
+            }
+        )
+
+    return cm_plans
+
+
+def build_demo_export_payload(
+    *,
+    planner_comments: Mapping[tuple[str, Hashable], str] | None = None,
+) -> dict[str, Any]:
     """Run the fixture through planning functions and return presentation rows."""
 
     demand_rows = _read_csv_rows("demand.csv")
+    last_accepted_demand_rows = _read_csv_rows("last_accepted_demand.csv")
     inventory_row = _read_csv_rows("inventory.csv")[0]
     production_plan_rows = _read_csv_rows("production_plan.csv")
     bom_rows = _read_csv_rows("bom.csv")
+    communicated_plan_rows = _read_csv_rows("last_communicated_cm_plan.csv")
+    if planner_comments is None:
+        planner_comments = {
+            (row["item"], row["period"]): row["comment"]
+            for row in _read_csv_rows("planner_comments.csv")
+        }
 
     with (FIXTURE_DIRECTORY / "policy.json").open(encoding="utf-8") as policy_file:
         policy = json.load(policy_file)
@@ -89,10 +255,43 @@ def build_demo_export_payload() -> dict[str, Any]:
         for period, requirement in production_requirements.items()
         if requirement.recommended_production > 0
     }
+    demand_changes = compare_demand_snapshots(
+        last_accepted_demand={
+            (row["item"], row["period"]): int(row["demand"])
+            for row in last_accepted_demand_rows
+        },
+        latest_demand={
+            (row["item"], row["period"]): int(row["demand"])
+            for row in demand_rows
+        },
+    )
+    planning_controls = classify_communicated_periods(
+        demand_changes=demand_changes,
+        new_production_recommendations={
+            (ITEM, period): requirement.recommended_production
+            for period, requirement in production_requirements.items()
+        },
+        communicated_plan=tuple(
+            CommunicatedPlanRecord(
+                item=row["item"],
+                period=row["period"],
+                communicated_quantity=int(row["communicated_qty"]),
+                cm=row["cm"],
+                communicated_date=row["communicated_date"],
+            )
+            for row in communicated_plan_rows
+        ),
+    )
+    planning_control_by_period = {
+        result.period: result
+        for result in planning_controls
+        if result.item == ITEM
+    }
 
     fg_plan_rows = []
     for result in fg_results:
         requirement = production_requirements[result.period]
+        planning_control = planning_control_by_period[result.period]
         start_result = production_start_results.get(result.period)
         if start_result and start_result.status != "OK":
             status = start_result.status
@@ -106,20 +305,47 @@ def build_demo_export_payload() -> dict[str, Any]:
                 "item": ITEM,
                 "period": result.period,
                 "demand": result.demand,
+                "previous_demand": planning_control.previous_demand,
+                "latest_demand": planning_control.latest_demand,
+                "demand_delta": planning_control.demand_delta,
+                "demand_change_type": planning_control.demand_change_type,
                 "opening_inventory": result.opening_balance,
                 "in_transit": result.in_transit,
                 "existing_production_receipt": result.existing_production_receipt,
+                "inbound_eta": (
+                    result.in_transit + result.existing_production_receipt
+                ),
                 "closing_balance_before_new_production": result.closing_balance,
                 "physical_shortage": result.physical_shortage,
                 "safety_stock_target": result.safety_stock_target,
                 "net_production_requirement": requirement.net_requirement,
                 "recommended_production": requirement.recommended_production,
+                "previously_communicated_cm_production": (
+                    planning_control.previously_communicated_production
+                ),
+                "newly_calculated_production_recommendation": (
+                    planning_control.newly_calculated_production_recommendation
+                ),
+                "production_delta": planning_control.production_delta,
+                "protected_production_quantity": (
+                    planning_control.protected_production_quantity
+                ),
                 "production_start_period": (
                     start_result.offset_period if start_result else None
                 ),
                 "status": status,
+                "planning_status": planning_control.planning_status,
+                "planner_comment_reason_required": (
+                    planning_control.review_comment_required
+                ),
             }
         )
+
+    cm_plans = build_cm_plan_views(
+        planning_controls=planning_controls,
+        ordered_periods=periods,
+        planner_comments=planner_comments,
+    )
 
     bom_components = tuple(
         BomComponent(
@@ -244,6 +470,7 @@ def build_demo_export_payload() -> dict[str, Any]:
     return {
         "fg_plan": fg_plan_rows,
         "component_plan": component_plan_rows,
+        "cm_plans": cm_plans,
         "summary": {
             "fg_additional_production_required": [
                 {
