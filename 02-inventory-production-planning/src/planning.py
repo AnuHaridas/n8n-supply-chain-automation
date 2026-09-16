@@ -70,6 +70,31 @@ class ComponentGrossRequirement:
     gross_requirement: int | float
 
 
+@dataclass(frozen=True)
+class ComponentPlanningPeriodResult:
+    """The explainable component supply position for one planning period."""
+
+    component_item: str
+    period: Hashable
+    opening_balance: int | float
+    gross_requirement: int | float
+    scheduled_receipt: int | float
+    closing_balance: int | float
+    physical_shortage: int | float
+    safety_stock_target: int | float
+    buffer_gap: int | float
+
+
+@dataclass(frozen=True)
+class PeriodOffsetResult:
+    """The outcome of offsetting a required period by a whole-period lead time."""
+
+    target_period: Hashable
+    lead_time_periods: int
+    offset_period: Hashable | None
+    status: str
+
+
 def evaluate_accepted_supply_plan(
     *,
     opening_inventory: int | float,
@@ -197,3 +222,122 @@ def explode_one_level_bom(
             )
 
     return requirements
+
+
+def evaluate_component_supply_plan(
+    *,
+    component_item: str,
+    periods: Sequence[Period],
+    opening_inventory: int | float,
+    gross_requirements_by_period: Mapping[Period, int | float],
+    scheduled_receipts_by_period: Mapping[Period, int | float],
+    safety_stock_target_by_period: Mapping[Period, int | float],
+) -> list[ComponentPlanningPeriodResult]:
+    """Evaluate time-phased gross-to-net supply for one component.
+
+    Every period must be present in each input mapping. Callers that do not use
+    component safety stock must explicitly provide a zero target for each period.
+    Negative closing balances remain backlog in subsequent periods.
+    """
+
+    results: list[ComponentPlanningPeriodResult] = []
+    current_opening_balance = opening_inventory
+
+    for period in periods:
+        gross_requirement = gross_requirements_by_period[period]
+        scheduled_receipt = scheduled_receipts_by_period[period]
+        safety_stock_target = safety_stock_target_by_period[period]
+
+        closing_balance = (
+            current_opening_balance + scheduled_receipt - gross_requirement
+        )
+        physical_shortage = max(0, -closing_balance)
+        buffer_gap = max(0, safety_stock_target - closing_balance)
+
+        results.append(
+            ComponentPlanningPeriodResult(
+                component_item=component_item,
+                period=period,
+                opening_balance=current_opening_balance,
+                gross_requirement=gross_requirement,
+                scheduled_receipt=scheduled_receipt,
+                closing_balance=closing_balance,
+                physical_shortage=physical_shortage,
+                safety_stock_target=safety_stock_target,
+                buffer_gap=buffer_gap,
+            )
+        )
+        current_opening_balance = closing_balance
+
+    return results
+
+
+def _offset_period(
+    *,
+    ordered_calendar: Sequence[Period],
+    target_period: Period,
+    lead_time_periods: int,
+) -> PeriodOffsetResult:
+    if (
+        isinstance(lead_time_periods, bool)
+        or not isinstance(lead_time_periods, int)
+        or lead_time_periods <= 0
+    ):
+        raise ValueError("Lead time must be a positive whole number of periods")
+
+    calendar = tuple(ordered_calendar)
+    if len(set(calendar)) != len(calendar):
+        raise ValueError("Ordered planning calendar contains duplicate periods")
+
+    try:
+        target_index = calendar.index(target_period)
+    except ValueError as error:
+        raise ValueError(
+            f"Target period {target_period!r} is not in the ordered planning calendar"
+        ) from error
+
+    offset_index = target_index - lead_time_periods
+    if offset_index < 0:
+        return PeriodOffsetResult(
+            target_period=target_period,
+            lead_time_periods=lead_time_periods,
+            offset_period=None,
+            status="PAST_DUE_RELEASE",
+        )
+
+    return PeriodOffsetResult(
+        target_period=target_period,
+        lead_time_periods=lead_time_periods,
+        offset_period=calendar[offset_index],
+        status="OK",
+    )
+
+
+def calculate_production_start_period(
+    *,
+    ordered_calendar: Sequence[Period],
+    fg_available_period: Period,
+    manufacturing_lead_time_periods: int,
+) -> PeriodOffsetResult:
+    """Offset an FG available period to its production start period."""
+
+    return _offset_period(
+        ordered_calendar=ordered_calendar,
+        target_period=fg_available_period,
+        lead_time_periods=manufacturing_lead_time_periods,
+    )
+
+
+def calculate_po_release_period(
+    *,
+    ordered_calendar: Sequence[Period],
+    component_need_period: Period,
+    purchase_lead_time_periods: int,
+) -> PeriodOffsetResult:
+    """Offset a component need period to its required PO release period."""
+
+    return _offset_period(
+        ordered_calendar=ordered_calendar,
+        target_period=component_need_period,
+        lead_time_periods=purchase_lead_time_periods,
+    )
