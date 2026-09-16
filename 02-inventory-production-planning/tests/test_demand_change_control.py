@@ -146,7 +146,7 @@ def test_demand_change_in_communicated_period_is_explicitly_flagged() -> None:
     assert result.planning_status == "FROZEN_PERIOD_DEMAND_CHANGE"
     assert result.demand_delta == 10
     assert result.frozen_period_demand_change is True
-    assert result.review_comment_required is True
+    assert result.review_comment_required is False
 
 
 def test_frozen_production_change_exposes_old_new_and_delta() -> None:

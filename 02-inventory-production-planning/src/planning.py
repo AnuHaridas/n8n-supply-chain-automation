@@ -494,7 +494,7 @@ def classify_communicated_periods(
                 new_recommendation - communicated.communicated_quantity
             )
             protected_quantity = communicated.communicated_quantity
-            review_comment_required = demand_changed or production_delta != 0
+            review_comment_required = production_delta != 0
             if production_delta != 0:
                 planning_status = "FROZEN_PERIOD_PRODUCTION_CHANGE"
             elif demand_changed:
